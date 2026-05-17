@@ -34,10 +34,37 @@ async def _show_categories(target, session: AsyncSession) -> None:
     categories = await get_all_categories(session)
     kb = get_categories_keyboard(categories)
     if isinstance(target, CallbackQuery):
-        await target.message.edit_text("Choose a category:", reply_markup=kb)
+        try:
+            await target.message.edit_text("Choose a category:", reply_markup=kb)
+        except TelegramBadRequest:
+            await target.message.answer("Choose a category:", reply_markup=kb)
         await target.answer()
     else:
         await target.answer("Choose a category:", reply_markup=kb)
+
+
+def _quick_qty_kb(product_id: int, max_qty: int) -> InlineKeyboardMarkup:
+    """Inline keyboard with quick quantity buttons for adding an item."""
+    b = InlineKeyboardBuilder()
+    num_btns = min(4, max_qty)
+    for qty in range(1, num_btns + 1):
+        b.button(text=str(qty), callback_data=f"qty:quick:{product_id}:{qty}")
+    b.button(text="✏️ Custom amount", callback_data=f"qty:custom:{product_id}")
+    b.button(text="❌ Cancel", callback_data="qty:cancel")
+    b.adjust(num_btns, 2)
+    return b.as_markup()
+
+
+def _cart_edit_quick_kb(pid: str, max_qty: int) -> InlineKeyboardMarkup:
+    """Inline keyboard with quick quantity buttons for editing a cart item."""
+    b = InlineKeyboardBuilder()
+    num_btns = min(4, max_qty)
+    for qty in range(1, num_btns + 1):
+        b.button(text=str(qty), callback_data=f"cart:edit:set:{pid}:{qty}")
+    b.button(text="✏️ Custom amount", callback_data=f"cart:edit:custom:{pid}")
+    b.button(text="❌ Cancel", callback_data="cart:view")
+    b.adjust(num_btns, 2)
+    return b.as_markup()
 
 
 def _build_cart_content(cart: dict) -> tuple[str, InlineKeyboardMarkup]:
@@ -51,29 +78,26 @@ def _build_cart_content(cart: dict) -> tuple[str, InlineKeyboardMarkup]:
     lines.append(f"\n💰 <b>Total: {int(total)}€</b>")
 
     b = InlineKeyboardBuilder()
-    widths = []
     for pid, item in cart.items():
-        if item["quantity"] > 1:
-            b.button(text=f"✏️ {item['name'][:14]}", callback_data=f"cart:edit:qty:{pid}")
-            b.button(text=f"🗑 {item['name'][:14]}", callback_data=f"cart:remove:prompt:{pid}")
-            widths.append(2)
-        else:
-            b.button(text=f"🗑 Remove {item['name'][:18]}", callback_data=f"cart:remove:prompt:{pid}")
-            widths.append(1)
+        b.button(text=f"✏️ {item['name'][:14]}", callback_data=f"cart:edit:qty:{pid}")
+        b.button(text=f"🗑 {item['name'][:14]}", callback_data=f"cart:remove:prompt:{pid}")
     b.button(text="🗑 Clear Cart", callback_data="cart:clear:prompt")
-    widths.append(1)
-    b.adjust(*widths)
+    b.adjust(*([2] * len(cart)), 1)
 
     return "\n".join(lines), b.as_markup()
+
+
+def _get_user_cart(data: dict) -> dict:
+    """Single source of truth for reading cart from FSM data."""
+    return data.get("cart", {})
 
 
 # ── Catalogue entry ───────────────────────────────────────────────────────────
 
 @router.message(F.text == "📋 Catalogue")
 async def show_catalog(message: Message, state: FSMContext, session: AsyncSession) -> None:
-    # Preserve cart when navigating away from any active state
     data = await state.get_data()
-    cart = data.get("cart", {})
+    cart = _get_user_cart(data)
     await state.clear()
     if cart:
         await state.update_data(cart=cart)
@@ -83,7 +107,7 @@ async def show_catalog(message: Message, state: FSMContext, session: AsyncSessio
 @router.callback_query(F.data == "goto:catalogue")
 async def goto_catalogue_cb(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
     data = await state.get_data()
-    cart = data.get("cart", {})
+    cart = _get_user_cart(data)
     await state.clear()
     if cart:
         await state.update_data(cart=cart)
@@ -133,9 +157,7 @@ async def select_item(callback: CallbackQuery, state: FSMContext, session: Async
         await callback.answer("Item unavailable.", show_alert=True)
         return
 
-    await state.update_data(pending_product_id=product_id)
-    await state.set_state(MenuStates.waiting_for_quantity)
-    logger.debug("User %s FSM: → waiting_for_quantity (product %d)", callback.from_user.id, product_id)
+    logger.debug("User %s viewing product %d (%s)", callback.from_user.id, product_id, product.name)
 
     desc_block = f"\n{product.description}\n" if product.description else ""
     full_caption = (
@@ -143,35 +165,143 @@ async def select_item(callback: CallbackQuery, state: FSMContext, session: Async
         f"{desc_block}\n"
         f"💰 Price: <b>{int(product.price)}€</b>\n"
         f"📦 Max per order: {product.max_quantity}\n\n"
-        f"Enter quantity (1–{product.max_quantity}), or /cancel:"
+        "Choose quantity:"
     )
     short_caption = (
         f"🍕 <b>{product.name}</b>\n\n"
         f"💰 Price: <b>{int(product.price)}€</b>\n"
         f"📦 Max per order: {product.max_quantity}\n\n"
-        f"Enter quantity (1–{product.max_quantity}), or /cancel:"
+        "Choose quantity:"
     )
 
+    kb = _quick_qty_kb(product_id, product.max_quantity)
     chat_id = callback.message.chat.id
 
     if product.image_url:
         caption = full_caption if len(full_caption) <= 1024 else short_caption
         try:
-            await bot.send_photo(chat_id=chat_id, photo=product.image_url,
-                                 caption=caption, parse_mode="HTML")
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=product.image_url,
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
             if len(full_caption) > 1024 and product.description:
                 await bot.send_message(chat_id=chat_id, text=product.description)
         except TelegramBadRequest as e:
             logger.error("Failed to send photo for product %d (url=%s): %s",
                          product_id, product.image_url, e)
-            await callback.message.answer(full_caption, parse_mode="HTML")
+            await callback.message.answer(full_caption, parse_mode="HTML", reply_markup=kb)
     else:
-        await callback.message.answer(full_caption, parse_mode="HTML")
+        await callback.message.answer(full_caption, parse_mode="HTML", reply_markup=kb)
 
     await callback.answer()
 
 
-# ── Quantity input ────────────────────────────────────────────────────────────
+# ── Quick quantity buttons ────────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("qty:quick:"))
+async def quick_qty_add(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    parts = callback.data.split(":")
+    product_id = int(parts[2])
+    qty = int(parts[3])
+
+    product = await get_product_by_id(session, product_id)
+    if not product or not product.in_stock:
+        await callback.answer("❌ Item no longer available.", show_alert=True)
+        return
+
+    if qty < 1 or qty > product.max_quantity:
+        await callback.answer(f"❌ Quantity must be 1–{product.max_quantity}.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    cart: dict = _get_user_cart(data)
+    pid_str = str(product_id)
+    in_cart = cart.get(pid_str, {}).get("quantity", 0)
+
+    if in_cart + qty > product.max_quantity:
+        remaining = product.max_quantity - in_cart
+        if remaining <= 0:
+            await callback.answer(
+                f"❌ You already have the max ({product.max_quantity}×) in cart.",
+                show_alert=True,
+            )
+        else:
+            await callback.answer(
+                f"❌ You can add up to {remaining} more (max {product.max_quantity}).",
+                show_alert=True,
+            )
+        return
+
+    if pid_str in cart:
+        cart[pid_str]["quantity"] += qty
+    else:
+        cart[pid_str] = {
+            "name": product.name,
+            "price": float(product.price),
+            "quantity": qty,
+            "max_quantity": product.max_quantity,
+        }
+
+    await state.update_data(cart=cart)
+    logger.info(
+        "User %s added product %d (%s) ×%d via quick button; cart now %d items, contents: %s",
+        callback.from_user.id, product_id, product.name, qty, len(cart),
+        {k: v["quantity"] for k, v in cart.items()},
+    )
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest:
+        pass
+
+    await callback.answer()
+    await callback.message.answer(
+        f"✅ <b>{product.name}</b> × {qty} added to cart!\n"
+        f"Items in cart: {len(cart)}",
+        parse_mode="HTML",
+        reply_markup=get_main_keyboard(),
+    )
+
+
+@router.callback_query(F.data.startswith("qty:custom:"))
+async def quick_qty_custom(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    product_id = int(callback.data.split(":")[2])
+    product = await get_product_by_id(session, product_id)
+    if not product or not product.in_stock:
+        await callback.answer("❌ Item no longer available.", show_alert=True)
+        return
+
+    await state.update_data(pending_product_id=product_id)
+    await state.set_state(MenuStates.waiting_for_quantity)
+    logger.debug(
+        "User %s FSM: → waiting_for_quantity (custom amount, product %d)",
+        callback.from_user.id, product_id,
+    )
+    await callback.answer()
+    await callback.message.answer(
+        f"✏️ Enter quantity for <b>{product.name}</b>\n"
+        f"(1–{product.max_quantity}), or /cancel to abort:",
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == "qty:cancel")
+async def quick_qty_cancel(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    await state.set_state(None)
+    await callback.answer("Cancelled.")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest:
+        pass
+    categories = await get_all_categories(session)
+    kb = get_categories_keyboard(categories)
+    await callback.message.answer("Choose a category:", reply_markup=kb)
+
+
+# ── Quantity text input (Custom amount only) ──────────────────────────────────
 
 @router.message(MenuStates.waiting_for_quantity, ~F.text.in_(MENU_TEXTS))
 async def handle_quantity(message: Message, state: FSMContext, session: AsyncSession) -> None:
@@ -192,7 +322,7 @@ async def handle_quantity(message: Message, state: FSMContext, session: AsyncSes
     data = await state.get_data()
     product_id = data.get("pending_product_id")
     logger.debug(
-        "User %s quantity input: %d (product_id=%s)",
+        "User %s custom quantity input: %d (product_id=%s)",
         message.from_user.id, quantity, product_id,
     )
 
@@ -223,7 +353,7 @@ async def handle_quantity(message: Message, state: FSMContext, session: AsyncSes
         )
         return
 
-    cart: dict = data.get("cart", {})
+    cart: dict = _get_user_cart(data)
     pid_str = str(product_id)
     in_cart = cart.get(pid_str, {}).get("quantity", 0)
 
@@ -255,9 +385,10 @@ async def handle_quantity(message: Message, state: FSMContext, session: AsyncSes
 
     await state.update_data(cart=cart, pending_product_id=None)
     await state.set_state(None)
-    logger.debug(
-        "User %s cart updated: product %d ×%d, total items=%d",
-        message.from_user.id, product_id, quantity, len(cart),
+    logger.info(
+        "User %s cart updated: product %d (%s) ×%d, cart now %d items, contents: %s",
+        message.from_user.id, product_id, product.name, quantity, len(cart),
+        {k: v["quantity"] for k, v in cart.items()},
     )
 
     await message.answer(
@@ -272,14 +403,17 @@ async def handle_quantity(message: Message, state: FSMContext, session: AsyncSes
 
 @router.message(F.text == "🛒 Cart")
 async def show_cart(message: Message, state: FSMContext) -> None:
-    # Read cart BEFORE any state modifications so we see the true current value
     data = await state.get_data()
-    cart: dict = data.get("cart", {})
+    cart: dict = _get_user_cart(data)
 
     await state.update_data(pending_product_id=None)
     await state.set_state(None)
 
-    logger.debug("User %s viewing cart: %d items", message.from_user.id, len(cart))
+    logger.info(
+        "User %s viewing cart: %d items, contents: %s",
+        message.from_user.id, len(cart),
+        {k: v["quantity"] for k, v in cart.items()},
+    )
 
     if not cart:
         b = InlineKeyboardBuilder()
@@ -297,7 +431,13 @@ async def show_cart(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data == "cart:view")
 async def cart_view_cb(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
-    cart: dict = data.get("cart", {})
+    cart: dict = _get_user_cart(data)
+
+    logger.info(
+        "User %s cart view (callback): %d items, contents: %s",
+        callback.from_user.id, len(cart),
+        {k: v["quantity"] for k, v in cart.items()},
+    )
 
     if not cart:
         b = InlineKeyboardBuilder()
@@ -320,7 +460,7 @@ async def cart_view_cb(callback: CallbackQuery, state: FSMContext) -> None:
 async def cart_remove_prompt(callback: CallbackQuery, state: FSMContext) -> None:
     pid = callback.data.split(":")[-1]
     data = await state.get_data()
-    cart: dict = data.get("cart", {})
+    cart: dict = _get_user_cart(data)
     if pid not in cart:
         await callback.answer("Item not found in cart.", show_alert=True)
         return
@@ -342,7 +482,7 @@ async def cart_remove_prompt(callback: CallbackQuery, state: FSMContext) -> None
 async def cart_remove_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     pid = callback.data.split(":")[-1]
     data = await state.get_data()
-    cart: dict = data.get("cart", {})
+    cart: dict = _get_user_cart(data)
 
     if pid not in cart:
         await callback.answer("Item not found.", show_alert=True)
@@ -351,7 +491,11 @@ async def cart_remove_confirm(callback: CallbackQuery, state: FSMContext) -> Non
     removed_name = cart.pop(pid)["name"]
     await state.update_data(cart=cart)
     await state.set_state(None)
-    logger.debug("User %s removed %s from cart, %d items remain", callback.from_user.id, removed_name, len(cart))
+    logger.info(
+        "User %s removed %s from cart, %d items remain, contents: %s",
+        callback.from_user.id, removed_name, len(cart),
+        {k: v["quantity"] for k, v in cart.items()},
+    )
 
     if not cart:
         b = InlineKeyboardBuilder()
@@ -371,7 +515,7 @@ async def cart_remove_confirm(callback: CallbackQuery, state: FSMContext) -> Non
 @router.callback_query(F.data == "cart:remove:no")
 async def cart_remove_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
-    cart: dict = data.get("cart", {})
+    cart: dict = _get_user_cart(data)
     if not cart:
         b = InlineKeyboardBuilder()
         b.button(text="📋 Go to Catalogue", callback_data="goto:catalogue")
@@ -392,18 +536,100 @@ async def cart_remove_cancel(callback: CallbackQuery, state: FSMContext) -> None
 async def cart_edit_qty_start(callback: CallbackQuery, state: FSMContext) -> None:
     pid = callback.data.split(":")[-1]
     data = await state.get_data()
-    cart: dict = data.get("cart", {})
+    cart: dict = _get_user_cart(data)
     if pid not in cart:
         await callback.answer("Item not found in cart.", show_alert=True)
         return
 
     item = cart[pid]
+    max_qty = item.get("max_quantity", 10)
+    kb = _cart_edit_quick_kb(pid, max_qty)
+    await callback.answer()
+    await callback.message.edit_text(
+        f"✏️ Edit <b>{item['name']}</b>\n"
+        f"Currently: × {item['quantity']}\n\n"
+        "Choose new quantity:",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(F.data.startswith("cart:edit:set:"))
+async def cart_edit_quick_set(callback: CallbackQuery, state: FSMContext) -> None:
+    parts = callback.data.split(":")
+    pid = parts[3]
+    new_qty = int(parts[4])
+
+    data = await state.get_data()
+    cart: dict = _get_user_cart(data)
+
+    if pid not in cart:
+        await callback.answer("Item not found.", show_alert=True)
+        return
+
+    item = cart[pid]
+    max_qty = item.get("max_quantity", 10)
+
+    if new_qty == 0:
+        removed_name = cart.pop(pid)["name"]
+        await state.update_data(cart=cart)
+        logger.info(
+            "User %s removed %s from cart via edit set=0, %d items remain",
+            callback.from_user.id, removed_name, len(cart),
+        )
+        await callback.answer(f"✅ {removed_name} removed")
+        if not cart:
+            b = InlineKeyboardBuilder()
+            b.button(text="📋 Go to Catalogue", callback_data="goto:catalogue")
+            await callback.message.edit_text(
+                "🛒 Your cart is empty.\n\nStart shopping in the Catalogue!",
+                reply_markup=b.as_markup(),
+            )
+        else:
+            text, kb = _build_cart_content(cart)
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        return
+
+    if new_qty > max_qty:
+        await callback.answer(f"❌ Max quantity is {max_qty}", show_alert=True)
+        return
+
+    old_qty = item["quantity"]
+    cart[pid]["quantity"] = new_qty
+    await state.update_data(cart=cart, editing_cart_pid=None)
+    logger.info(
+        "User %s changed %s qty %d→%d via quick button; cart: %s",
+        callback.from_user.id, item["name"], old_qty, new_qty,
+        {k: v["quantity"] for k, v in cart.items()},
+    )
+
+    subtotal = int(item["price"] * new_qty)
+    text, kb = _build_cart_content(cart)
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await callback.answer()
+    await callback.message.answer(
+        f"✅ Updated: <b>{item['name']}</b> × {new_qty} = {subtotal}€",
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("cart:edit:custom:"))
+async def cart_edit_custom_start(callback: CallbackQuery, state: FSMContext) -> None:
+    pid = callback.data.split(":")[-1]
+    data = await state.get_data()
+    cart: dict = _get_user_cart(data)
+    if pid not in cart:
+        await callback.answer("Item not found.", show_alert=True)
+        return
+
+    item = cart[pid]
+    max_qty = item.get("max_quantity", 10)
     await state.update_data(editing_cart_pid=pid)
     await state.set_state(CartEditStates.waiting_for_qty)
     await callback.answer()
     await callback.message.answer(
         f"✏️ Enter new quantity for <b>{item['name']}</b>\n"
-        f"(1–{item['max_quantity']}, or /cancel to abort):",
+        f"(1–{max_qty}, or 0 to remove, or /cancel to abort):",
         parse_mode="HTML",
     )
 
@@ -417,16 +643,16 @@ async def handle_cart_edit_qty(message: Message, state: FSMContext, session: Asy
     try:
         new_qty = int(message.text.strip())
     except ValueError:
-        await message.answer("❌ Please enter a whole number (e.g. 1, 2, 3):")
+        await message.answer("❌ Please enter a whole number (e.g. 0, 1, 2, 3):")
         return
 
-    if new_qty <= 0:
-        await message.answer("❌ Quantity must be at least 1:")
+    if new_qty < 0:
+        await message.answer("❌ Quantity must be 0 or higher (0 = remove item):")
         return
 
     data = await state.get_data()
     pid = data.get("editing_cart_pid")
-    cart: dict = data.get("cart", {})
+    cart: dict = _get_user_cart(data)
 
     if not pid or pid not in cart:
         await message.answer("❌ Item not found. Try opening your cart again.")
@@ -434,6 +660,22 @@ async def handle_cart_edit_qty(message: Message, state: FSMContext, session: Asy
         return
 
     item = cart[pid]
+
+    if new_qty == 0:
+        removed_name = cart.pop(pid)["name"]
+        await state.update_data(cart=cart, editing_cart_pid=None)
+        await state.set_state(None)
+        logger.info(
+            "User %s removed %s from cart via qty=0 text input, %d items remain",
+            message.from_user.id, removed_name, len(cart),
+        )
+        await message.answer(
+            f"✅ <b>{removed_name}</b> removed from cart.",
+            parse_mode="HTML",
+            reply_markup=get_main_keyboard(),
+        )
+        return
+
     try:
         product = await get_product_by_id(session, int(pid))
     except Exception:
@@ -444,17 +686,24 @@ async def handle_cart_edit_qty(message: Message, state: FSMContext, session: Asy
 
     if new_qty > max_qty:
         await message.answer(
-            f"❌ Please enter a number between 1 and <b>{max_qty}</b>:",
+            f"❌ Please enter a number between 0 and <b>{max_qty}</b>:",
             parse_mode="HTML",
         )
         return
 
+    old_qty = item["quantity"]
     cart[pid]["quantity"] = new_qty
     await state.update_data(cart=cart, editing_cart_pid=None)
     await state.set_state(None)
+    logger.info(
+        "User %s changed %s qty %d→%d via text; cart: %s",
+        message.from_user.id, item["name"], old_qty, new_qty,
+        {k: v["quantity"] for k, v in cart.items()},
+    )
 
+    subtotal = int(item["price"] * new_qty)
     await message.answer(
-        f"✅ Updated: <b>{item['name']}</b> × {new_qty}",
+        f"✅ Updated: <b>{item['name']}</b> × {new_qty} = {subtotal}€",
         parse_mode="HTML",
         reply_markup=get_main_keyboard(),
     )
@@ -464,9 +713,8 @@ async def handle_cart_edit_qty(message: Message, state: FSMContext, session: Asy
 
 @router.message(F.text == "🗑 Clear Cart")
 async def clear_cart_menu(message: Message, state: FSMContext) -> None:
-    # Read cart FIRST before any state modifications
     data = await state.get_data()
-    cart = data.get("cart", {})
+    cart = _get_user_cart(data)
 
     await state.update_data(pending_product_id=None)
     await state.set_state(None)
@@ -495,7 +743,7 @@ async def clear_cart_prompt_cb(callback: CallbackQuery) -> None:
 async def clear_cart_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(cart={}, pending_product_id=None)
     await state.set_state(None)
-    logger.debug("User %s cleared their cart", callback.from_user.id)
+    logger.info("User %s cleared their cart", callback.from_user.id)
     await callback.message.edit_text("🗑 Cart cleared.")
     await callback.answer("✅ Cart cleared")
 
@@ -503,7 +751,7 @@ async def clear_cart_confirm(callback: CallbackQuery, state: FSMContext) -> None
 @router.callback_query(F.data == "cart:clear:no")
 async def clear_cart_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
-    cart: dict = data.get("cart", {})
+    cart: dict = _get_user_cart(data)
     if cart:
         text, kb = _build_cart_content(cart)
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)

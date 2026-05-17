@@ -1,4 +1,5 @@
 import logging
+import re
 
 from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
@@ -116,16 +117,12 @@ async def get_name(message: Message, state: FSMContext) -> None:
 
 # ── Step 2: phone ─────────────────────────────────────────────────────────────
 
-def _normalize_phone(raw: str) -> str | None:
-    cleaned = "".join(c for c in raw if c.isdigit() or c == "+")
-    cleaned = cleaned.lstrip("+")
-    digits = "".join(c for c in cleaned if c.isdigit())
+_PHONE_RE = re.compile(r'^\+\d{10,15}$')
 
-    if raw.strip().startswith("+7") and len(digits) == 11 and digits.startswith("7"):
-        return "+" + digits
-    if len(digits) == 11 and digits[0] in ("7", "8"):
-        return "+7" + digits[1:]
-    return None
+
+def _normalize_phone(raw: str) -> str | None:
+    stripped = re.sub(r'[\s\-\(\)]', '', raw.strip())
+    return stripped if _PHONE_RE.match(stripped) else None
 
 
 @router.message(CheckoutStates.waiting_for_phone, ~F.text.in_(MENU_TEXTS))
@@ -138,9 +135,10 @@ async def get_phone(message: Message, state: FSMContext) -> None:
     if phone is None:
         await message.answer(
             "❌ Invalid phone number.\n\n"
-            "Accepted formats:\n"
+            "Please use international format starting with <b>+</b>:\n"
             "• <code>+7 999 123 45 67</code>\n"
-            "• <code>8 999 123 45 67</code>\n\n"
+            "• <code>+380 50 123 45 67</code>\n\n"
+            "The number must begin with + followed by 10–15 digits.\n"
             "Please try again:",
             parse_mode="HTML",
         )
@@ -172,6 +170,13 @@ async def get_address(message: Message, state: FSMContext, session: AsyncSession
     address = message.text.strip()
     if len(address) < 5 or len(address) > 500:
         await message.answer("❌ Address must be between 5 and 500 characters. Please enter your full address:")
+        return
+    if not any(c.isdigit() for c in address):
+        await message.answer(
+            "❌ Please include a building or house number in your address.\n"
+            "Example: <i>Baker Street 221, apt 5</i>",
+            parse_mode="HTML",
+        )
         return
 
     data = await state.get_data()
@@ -447,6 +452,10 @@ async def payment_cancel_by_user(
 
 # ── Fallback: catch-all for any unhandled message ────────────────────────────
 
+# States owned by menu.py that the fallback must not interrupt
+_MENU_FSM_STATES = {"MenuStates:waiting_for_quantity", "CartEditStates:waiting_for_qty"}
+
+
 @router.message()
 async def fallback_handler(message: Message, state: FSMContext) -> None:
     current_state = await state.get_state()
@@ -455,24 +464,31 @@ async def fallback_handler(message: Message, state: FSMContext) -> None:
         message.from_user.id, current_state, message.text,
     )
 
-    # Give step-specific guidance so the user knows what's expected
-    if current_state == CheckoutStates.waiting_for_name:
+    # These states are handled by menu.router — if we reach here something
+    # unexpected happened; give a useful prompt and keep the state intact.
+    if current_state in _MENU_FSM_STATES:
+        await message.answer(
+            "Please enter a number, or use /cancel to abort.",
+        )
+        return
+
+    # Give step-specific guidance for checkout states
+    if current_state == CheckoutStates.waiting_for_name.state:
         await message.answer(
             "Please enter your <b>name</b> (text, at least 2 characters):",
             parse_mode="HTML",
         )
         return
 
-    if current_state == CheckoutStates.waiting_for_phone:
+    if current_state == CheckoutStates.waiting_for_phone.state:
         await message.answer(
-            "Please enter your <b>phone number</b>:\n"
-            "• <code>+7 999 123 45 67</code>\n"
-            "• <code>8 999 123 45 67</code>",
+            "Please enter your <b>phone number</b> in international format:\n"
+            "• <code>+7 999 123 45 67</code>",
             parse_mode="HTML",
         )
         return
 
-    if current_state == CheckoutStates.waiting_for_address:
+    if current_state == CheckoutStates.waiting_for_address.state:
         await message.answer(
             "Please enter your <b>delivery address</b> (street, building, apartment):",
             parse_mode="HTML",
@@ -489,6 +505,6 @@ async def fallback_handler(message: Message, state: FSMContext) -> None:
             logger.debug("Fallback: preserved cart for user %s (%d items)", message.from_user.id, len(cart))
 
     await message.answer(
-        "I didn't understand that. Please use the menu below.",
+        "💡 Use the menu buttons below to navigate.",
         reply_markup=get_main_keyboard(),
     )
