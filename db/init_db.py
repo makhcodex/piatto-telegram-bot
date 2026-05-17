@@ -11,15 +11,15 @@ SEED_CATEGORIES = [
 ]
 
 SEED_PRODUCTS = [
-    {"name": "Margherita",    "category": "pizza",    "price": 12, "max_quantity": 20, "description": "Tomato sauce, mozzarella, basil"},
-    {"name": "Pepperoni",     "category": "pizza",    "price": 14, "max_quantity": 15, "description": "Pepperoni, mozzarella, tomato sauce"},
-    {"name": "Four Cheese",   "category": "pizza",    "price": 15, "max_quantity": 15, "description": "Mozzarella, cheddar, gouda, parmesan"},
-    {"name": "Cola 0.5L",     "category": "drinks",   "price":  3, "max_quantity": 50, "description": "Coca-Cola 0.5L"},
-    {"name": "Water 0.5L",    "category": "drinks",   "price":  2, "max_quantity": 100,"description": "Still mineral water"},
-    {"name": "Orange Juice",  "category": "drinks",   "price":  4, "max_quantity": 30, "description": "100% natural orange juice"},
-    {"name": "Tiramisu",      "category": "desserts", "price":  8, "max_quantity": 10, "description": "Classic Italian dessert"},
-    {"name": "Cheesecake",    "category": "desserts", "price":  7, "max_quantity": 10, "description": "New York style cheesecake"},
-    {"name": "Brownie",       "category": "desserts", "price":  5, "max_quantity": 20, "description": "Chocolate brownie"},
+    {"name": "Margherita",    "category": "pizza",    "price": 12.50, "max_quantity": 20, "description": "Tomato sauce, mozzarella, basil"},
+    {"name": "Pepperoni",     "category": "pizza",    "price": 14.50, "max_quantity": 15, "description": "Pepperoni, mozzarella, tomato sauce"},
+    {"name": "Four Cheese",   "category": "pizza",    "price": 15.00, "max_quantity": 15, "description": "Mozzarella, cheddar, gouda, parmesan"},
+    {"name": "Cola 0.5L",     "category": "drinks",   "price":  1.99, "max_quantity": 50, "description": "Coca-Cola 0.5L"},
+    {"name": "Water 0.5L",    "category": "drinks",   "price":  1.49, "max_quantity": 100,"description": "Still mineral water"},
+    {"name": "Orange Juice",  "category": "drinks",   "price":  2.49, "max_quantity": 30, "description": "100% natural orange juice"},
+    {"name": "Tiramisu",      "category": "desserts", "price":  6.50, "max_quantity": 10, "description": "Classic Italian dessert"},
+    {"name": "Cheesecake",    "category": "desserts", "price":  5.50, "max_quantity": 10, "description": "New York style cheesecake"},
+    {"name": "Brownie",       "category": "desserts", "price":  4.50, "max_quantity": 20, "description": "Chocolate brownie"},
 ]
 
 
@@ -90,6 +90,13 @@ async def _safe_migrations(conn) -> None:
                 text("UPDATE products SET name = :en WHERE name = :ru"),
                 {"en": en_name, "ru": ru_name},
             )
+
+    # ── Override unrealistic legacy prices with realistic ones ──────────────────
+    for p in SEED_PRODUCTS:
+        await conn.execute(
+            text("UPDATE products SET price = :price WHERE name = :name"),
+            {"price": p["price"], "name": p["name"]}
+        )
 
 
 async def init_db() -> None:

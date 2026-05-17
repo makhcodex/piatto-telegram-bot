@@ -2,7 +2,7 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 MENU_TEXTS = frozenset({
     "📋 Catalogue", "🛒 Cart", "✅ Place Order",
-    "🗑 Clear Cart", "📦 My Orders",
+    "📦 My Orders",
 })
 
 
@@ -11,7 +11,7 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="📋 Catalogue")],
             [KeyboardButton(text="🛒 Cart"), KeyboardButton(text="✅ Place Order")],
-            [KeyboardButton(text="📦 My Orders"), KeyboardButton(text="🗑 Clear Cart")],
+            [KeyboardButton(text="📦 My Orders")],
         ],
         resize_keyboard=True,
         one_time_keyboard=False,

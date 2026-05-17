@@ -236,7 +236,7 @@ async def quick_qty_add(callback: CallbackQuery, state: FSMContext, session: Asy
         return
 
     if pid_str in cart:
-        cart[pid_str]["quantity"] += qty
+        cart[pid_str]["quantity"] = qty
     else:
         cart[pid_str] = {
             "name": product.name,
@@ -259,7 +259,7 @@ async def quick_qty_add(callback: CallbackQuery, state: FSMContext, session: Asy
 
     await callback.answer()
     await callback.message.answer(
-        f"✅ <b>{product.name}</b> × {qty} added to cart!\n"
+        f"✅ <b>{product.name}</b> quantity set to {qty}!\n"
         f"Items in cart: {len(cart)}",
         parse_mode="HTML",
         reply_markup=get_main_keyboard(),
@@ -374,7 +374,7 @@ async def handle_quantity(message: Message, state: FSMContext, session: AsyncSes
         return
 
     if pid_str in cart:
-        cart[pid_str]["quantity"] += quantity
+        cart[pid_str]["quantity"] = quantity
     else:
         cart[pid_str] = {
             "name": product.name,
@@ -392,7 +392,7 @@ async def handle_quantity(message: Message, state: FSMContext, session: AsyncSes
     )
 
     await message.answer(
-        f"✅ <b>{product.name}</b> × {quantity} added to cart!\n"
+        f"✅ <b>{product.name}</b> quantity set to {quantity}!\n"
         f"Items in cart: {len(cart)}",
         parse_mode="HTML",
         reply_markup=get_main_keyboard(),
@@ -415,17 +415,26 @@ async def show_cart(message: Message, state: FSMContext) -> None:
         {k: v["quantity"] for k, v in cart.items()},
     )
 
+    last_msg_id = data.get("last_cart_msg_id")
+    if last_msg_id:
+        try:
+            await message.bot.delete_message(chat_id=message.chat.id, message_id=last_msg_id)
+        except Exception:
+            pass
+
     if not cart:
         b = InlineKeyboardBuilder()
         b.button(text="📋 Go to Catalogue", callback_data="goto:catalogue")
-        await message.answer(
+        sent = await message.answer(
             "🛒 Your cart is empty.\n\nStart shopping in the Catalogue!",
             reply_markup=b.as_markup(),
         )
+        await state.update_data(last_cart_msg_id=sent.message_id)
         return
 
     text, kb = _build_cart_content(cart)
-    await message.answer(text, parse_mode="HTML", reply_markup=kb)
+    sent = await message.answer(text, parse_mode="HTML", reply_markup=kb)
+    await state.update_data(last_cart_msg_id=sent.message_id)
 
 
 @router.callback_query(F.data == "cart:view")
@@ -450,7 +459,10 @@ async def cart_view_cb(callback: CallbackQuery, state: FSMContext) -> None:
         return
 
     text, kb = _build_cart_content(cart)
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except TelegramBadRequest:
+        pass
     await callback.answer()
 
 
@@ -470,11 +482,14 @@ async def cart_remove_prompt(callback: CallbackQuery, state: FSMContext) -> None
     b.button(text="✅ Yes, Remove", callback_data=f"cart:remove:yes:{pid}")
     b.button(text="❌ No, Keep",    callback_data="cart:remove:no")
     b.adjust(2)
-    await callback.message.edit_text(
-        f"❓ Remove <b>{name}</b> from your cart?",
-        parse_mode="HTML",
-        reply_markup=b.as_markup(),
-    )
+    try:
+        await callback.message.edit_text(
+            f"❓ Remove <b>{name}</b> from your cart?",
+            parse_mode="HTML",
+            reply_markup=b.as_markup(),
+        )
+    except TelegramBadRequest:
+        pass
     await callback.answer()
 
 
@@ -508,7 +523,10 @@ async def cart_remove_confirm(callback: CallbackQuery, state: FSMContext) -> Non
         return
 
     text, kb = _build_cart_content(cart)
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except TelegramBadRequest:
+        pass
     await callback.answer(f"✅ Removed {removed_name}")
 
 
@@ -526,7 +544,10 @@ async def cart_remove_cancel(callback: CallbackQuery, state: FSMContext) -> None
         await callback.answer()
         return
     text, kb = _build_cart_content(cart)
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except TelegramBadRequest:
+        pass
     await callback.answer()
 
 
@@ -545,13 +566,16 @@ async def cart_edit_qty_start(callback: CallbackQuery, state: FSMContext) -> Non
     max_qty = item.get("max_quantity", 10)
     kb = _cart_edit_quick_kb(pid, max_qty)
     await callback.answer()
-    await callback.message.edit_text(
-        f"✏️ Edit <b>{item['name']}</b>\n"
-        f"Currently: × {item['quantity']}\n\n"
-        "Choose new quantity:",
-        parse_mode="HTML",
-        reply_markup=kb,
-    )
+    try:
+        await callback.message.edit_text(
+            f"✏️ Edit <b>{item['name']}</b>\n"
+            f"Currently: × {item['quantity']}\n\n"
+            "Choose new quantity:",
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+    except TelegramBadRequest:
+        pass
 
 
 @router.callback_query(F.data.startswith("cart:edit:set:"))
@@ -581,13 +605,19 @@ async def cart_edit_quick_set(callback: CallbackQuery, state: FSMContext) -> Non
         if not cart:
             b = InlineKeyboardBuilder()
             b.button(text="📋 Go to Catalogue", callback_data="goto:catalogue")
-            await callback.message.edit_text(
-                "🛒 Your cart is empty.\n\nStart shopping in the Catalogue!",
-                reply_markup=b.as_markup(),
-            )
+            try:
+                await callback.message.edit_text(
+                    "🛒 Your cart is empty.\n\nStart shopping in the Catalogue!",
+                    reply_markup=b.as_markup(),
+                )
+            except TelegramBadRequest:
+                pass
         else:
             text, kb = _build_cart_content(cart)
-            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+            try:
+                await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+            except TelegramBadRequest:
+                pass
         return
 
     if new_qty > max_qty:
@@ -605,7 +635,10 @@ async def cart_edit_quick_set(callback: CallbackQuery, state: FSMContext) -> Non
 
     subtotal = int(item["price"] * new_qty)
     text, kb = _build_cart_content(cart)
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except TelegramBadRequest:
+        pass
     await callback.answer()
     await callback.message.answer(
         f"✅ Updated: <b>{item['name']}</b> × {new_qty} = {subtotal}€",
@@ -732,10 +765,13 @@ async def clear_cart_menu(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "cart:clear:prompt")
 async def clear_cart_prompt_cb(callback: CallbackQuery) -> None:
-    await callback.message.edit_text(
-        "Are you sure? Your entire cart will be cleared.",
-        reply_markup=_clear_cart_confirm_kb(),
-    )
+    try:
+        await callback.message.edit_text(
+            "Are you sure? Your entire cart will be cleared.",
+            reply_markup=_clear_cart_confirm_kb(),
+        )
+    except TelegramBadRequest:
+        pass
     await callback.answer()
 
 
@@ -744,7 +780,10 @@ async def clear_cart_confirm(callback: CallbackQuery, state: FSMContext) -> None
     await state.update_data(cart={}, pending_product_id=None)
     await state.set_state(None)
     logger.info("User %s cleared their cart", callback.from_user.id)
-    await callback.message.edit_text("🗑 Cart cleared.")
+    try:
+        await callback.message.edit_text("🗑 Cart cleared.")
+    except TelegramBadRequest:
+        pass
     await callback.answer("✅ Cart cleared")
 
 
@@ -754,9 +793,15 @@ async def clear_cart_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     cart: dict = _get_user_cart(data)
     if cart:
         text, kb = _build_cart_content(cart)
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        try:
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        except TelegramBadRequest:
+            pass
     else:
-        await callback.message.edit_text("Cancelled.")
+        try:
+            await callback.message.edit_text("Cancelled.")
+        except TelegramBadRequest:
+            pass
     await callback.answer()
 
 
